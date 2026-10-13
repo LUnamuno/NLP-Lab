@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+outputs/*
+!outputs/.gitkeep
+.DS_Store
+
+# Per-review predictions contain IMDb review text
+docs/**/predictions.csv
