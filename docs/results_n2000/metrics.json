@@ -1,0 +1,72 @@
+{
+  "config": {
+    "n": 2000,
+    "seed": 42,
+    "train_size": 1500,
+    "test_size": 500
+  },
+  "classical": {
+    "0": {
+      "precision": 0.8930232558139535,
+      "recall": 0.768,
+      "f1-score": 0.8258064516129032,
+      "support": 250.0
+    },
+    "1": {
+      "precision": 0.7964912280701755,
+      "recall": 0.908,
+      "f1-score": 0.8485981308411215,
+      "support": 250.0
+    },
+    "accuracy": 0.838,
+    "macro avg": {
+      "precision": 0.8447572419420645,
+      "recall": 0.8380000000000001,
+      "f1-score": 0.8372022912270123,
+      "support": 500.0
+    },
+    "weighted avg": {
+      "precision": 0.8447572419420644,
+      "recall": 0.838,
+      "f1-score": 0.8372022912270123,
+      "support": 500.0
+    }
+  },
+  "transformer_subset": {
+    "0": {
+      "precision": 0.889763779527559,
+      "recall": 0.9416666666666667,
+      "f1-score": 0.9149797570850202,
+      "support": 120.0
+    },
+    "1": {
+      "precision": 0.943089430894309,
+      "recall": 0.8923076923076924,
+      "f1-score": 0.9169960474308301,
+      "support": 130.0
+    },
+    "accuracy": 0.916,
+    "macro avg": {
+      "precision": 0.916426605210934,
+      "recall": 0.9169871794871796,
+      "f1-score": 0.9159879022579251,
+      "support": 250.0
+    },
+    "weighted avg": {
+      "precision": 0.9174931182382691,
+      "recall": 0.916,
+      "f1-score": 0.9160282280648413,
+      "support": 250.0
+    }
+  },
+  "comparison_note": "Different training corpora; transformer uses truncated inputs and a subset. Not a controlled benchmark.",
+  "classical_same_subset_macro_f1": 0.8622723442867328,
+  "transformer_subset_macro_f1": 0.9159879022579251,
+  "classical_same_subset_accuracy": 0.864,
+  "transformer_subset_accuracy": 0.916,
+  "transformer_subset_size": 250,
+  "transformer_minus_classical_macro_f1_ci95": [
+    0.006800871928698297,
+    0.09956261244840815
+  ]
+}
