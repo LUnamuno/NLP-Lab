@@ -11,7 +11,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, ConfusionMatrixDisplay, f1_score
 from sklearn.model_selection import train_test_split
 from wordcloud import WordCloud
-from .text_utils import tokenize, top_ngrams
+from .text_utils import STOPWORDS, exploratory_tokens, strip_html_breaks, top_ngrams
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "outputs"
@@ -34,15 +34,16 @@ def main(n: int, seed: int, transformer_n: int):
     df = load_reviews(n, seed)
     train, test = train_test_split(df, test_size=0.25, stratify=df.label, random_state=seed)
 
-    # Exploratory word-level features; avoid using these to rewrite the text
-    # passed to TF-IDF or the transformer, since negation/punctuation matters.
+    # Exploratory visuals only: strip <br /> and drop stopwords here.
+    # TF-IDF / transformer still see raw reviews (negation and punctuation matter).
     for label, name in ((0, "negative"), (1, "positive")):
         texts = train.loc[train.label == label, "text"].tolist()
-        tokens = [tok for text in texts for tok in tokenize(text)]
         from collections import Counter
+        tokens = [tok for text in texts for tok in exploratory_tokens(text)]
         pd.DataFrame(Counter(tokens).most_common(30), columns=["word", "frequency"]).to_csv(OUT / f"words_{name}.csv", index=False)
         pd.DataFrame(top_ngrams(texts, n=2), columns=["bigram", "frequency"]).to_csv(OUT / f"bigrams_{name}.csv", index=False)
-        wc = WordCloud(width=900, height=450, background_color="white").generate(" ".join(texts))
+        cleaned = " ".join(strip_html_breaks(text) for text in texts)
+        wc = WordCloud(width=900, height=450, background_color="white", stopwords=STOPWORDS).generate(cleaned)
         wc.to_file(str(OUT / f"wordcloud_{name}.png"))
 
     vectorizer = TfidfVectorizer(ngram_range=(1, 2), min_df=2, max_features=20000, strip_accents="unicode")

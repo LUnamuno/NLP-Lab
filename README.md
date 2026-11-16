@@ -19,7 +19,7 @@ Results go to `outputs/` (ignored by Git): frequency tables, bigram tables, word
 ## Methodology
 
 - Random seed 42; balanced IMDb sample from the **train** split; stratified 75/25 train/test split.
-- Only training data is used for frequency visuals, to avoid leaking exploratory information from test examples.
+- Only training data is used for frequency visuals, to avoid leaking exploratory information from test examples. Exploratory tables and word clouds strip IMDb `<br />` tags and English stopwords; classifiers still receive raw reviews.
 - Classic baseline: TF-IDF unigrams+bigrams (fit on train only), Logistic Regression; evaluate on held-out test set.
 - Transformer: use a previously fine-tuned `distilbert-base-uncased-finetuned-sst-2-english` pipeline, on up to 40 **same held-out** texts with truncation; no fine-tuning is done here.
 - Comparison: for fairness within that small subset, compute classical model's F1 on the very same texts. Still **not** a controlled benchmark: DistilBERT was trained on SST-2, IMDb is a different distribution, and reviews may be truncated. Report both sample size and limitation.
@@ -43,9 +43,9 @@ Run with `python -m src.run --n 400 --transformer-n 40` (seed 42): 300 training 
 
 ### 1. Most frequent words and bigrams
 
-Frequencies barely separate the classes. In both, the top words are stopwords (`the`, `a`, `and`, `of`, `to`) and `br`, the leftover HTML `<br />` tag. The top bigrams (`br br`, `of the`, `in the`, `this movie`, `this film`) are almost identical in both classes. Polarity words such as `bad`, `great` or `worst` do not appear in the top 30.
+After stripping `<br />` and English stopwords **for visuals only**, class differences show up more clearly. Shared domain words still dominate (`movie`, `film`, `like`, `story`, `time`), but polarity cues now appear in the top ranks: negative reviews favour `bad`, `don't`, and bigrams such as `waste time`, `really bad`, `worst movie`; positive reviews favour `great`, `love`, `best`, and bigrams such as `movie great`, `good film`, `thought provoking`.
 
-Stopwords are deliberately not removed, since negation matters for the classifiers. That choice makes the exploratory tables and word clouds say little about sentiment. To see polarity cues, one would need to filter stopwords and `br`, or compare relative frequencies between classes (e.g. log-odds). With only 300 training reviews the counts are also noisy.
+Classifiers still see raw text (including stopwords and negation). With only 300 training reviews the counts remain noisy, and absolute frequency is still a blunt tool compared with relative measures (e.g. log-odds).
 
 ### 2. Classical baseline
 
@@ -71,9 +71,9 @@ In this sample, the reviews where DistilBERT fails are on average shorter (about
 
 ### 5. Next steps
 
-- Clean `<br />` and try filtering stopwords for the exploratory analysis only, not for the classifiers.
 - Use more data (e.g. `--n 4000`) and cross-validation or bootstrap intervals to estimate uncertainty.
 - Evaluate DistilBERT on all 100 test reviews, not just 40.
+- Compare relative frequencies between classes (e.g. log-odds) instead of raw counts.
 - Add a third baseline, such as a transformer fine-tuned on IMDb, to separate the effect of domain from the effect of architecture.
 
 ## Source
