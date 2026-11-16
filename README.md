@@ -11,16 +11,17 @@ python -m venv .venv
 source .venv/bin/activate   # Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python -m pytest -q
-python -m src.run --n 400 --transformer-n 40
+python -m src.run --n 4000 --transformer-n 40
 ```
 
-Results go to `outputs/` (ignored by Git): frequency tables, bigram tables, word clouds, confusion matrix, and `metrics.json`. Add a few sample plots or a metrics table to this README before publishing, and write your own interpretation and limitations.
+Results go to `outputs/` (ignored by Git): frequency tables, bigram tables, word clouds, confusion matrix, and `metrics.json`. Optional flags: `--bootstrap-n` (default 1000) for macro-F1 95% CIs.
 
 ## Methodology
 
-- Random seed 42; balanced IMDb sample from the **train** split; stratified 75/25 train/test split.
+- Random seed 42; balanced IMDb sample from the **train** split (`--n 4000` by default); stratified 75/25 train/test split.
 - Only training data is used for frequency visuals, to avoid leaking exploratory information from test examples. Exploratory tables and word clouds strip IMDb `<br />` tags and English stopwords; classifiers still receive raw reviews.
 - Classic baseline: TF-IDF unigrams+bigrams (fit on train only), Logistic Regression; evaluate on held-out test set.
+- Uncertainty: percentile **95% bootstrap CIs** for macro F1 by resampling the evaluation predictions (test-set sampling noise around a fixed model, not retraining variance).
 - Transformer: use a previously fine-tuned `distilbert-base-uncased-finetuned-sst-2-english` pipeline, on up to 40 **same held-out** texts with truncation; no fine-tuning is done here.
 - Comparison: for fairness within that small subset, compute classical model's F1 on the very same texts. Still **not** a controlled benchmark: DistilBERT was trained on SST-2, IMDb is a different distribution, and reviews may be truncated. Report both sample size and limitation.
 
@@ -33,46 +34,47 @@ Results go to `outputs/` (ignored by Git): frequency tables, bigram tables, word
 
 ## Results and discussion
 
-Run with `python -m src.run --n 400 --transformer-n 40` (seed 42): 300 training reviews, 100 test reviews, 40 of which were also scored with DistilBERT.
+Run with `python -m src.run --n 4000 --transformer-n 40` (seed 42, 1000 bootstrap resamples): 3000 training reviews, 1000 test reviews, 40 of which were also scored with DistilBERT.
 
-| Model | Macro F1 | Evaluated on |
-|---|---|---|
-| TF-IDF + Logistic Regression | 0.738 | 100 held-out test reviews |
-| TF-IDF + Logistic Regression | 0.680 | the same 40-review subset |
-| DistilBERT (SST-2) | 0.792 | the same 40-review subset |
+| Model | Macro F1 | 95% bootstrap CI | Evaluated on |
+|---|---|---|---|
+| TF-IDF + Logistic Regression | 0.844 | [0.821, 0.865] | 1000 held-out test reviews |
+| TF-IDF + Logistic Regression | 0.798 | [0.670, 0.916] | the same 40-review subset |
+| DistilBERT (SST-2) | 0.925 | [0.824, 1.000] | the same 40-review subset |
+
+For comparison, the earlier `--n 400` classical run scored 0.738 on 100 test reviews.
 
 ### 1. Most frequent words and bigrams
 
-After stripping `<br />` and English stopwords **for visuals only**, class differences show up more clearly. Shared domain words still dominate (`movie`, `film`, `like`, `story`, `time`), but polarity cues now appear in the top ranks: negative reviews favour `bad`, `don't`, and bigrams such as `waste time`, `really bad`, `worst movie`; positive reviews favour `great`, `love`, `best`, and bigrams such as `movie great`, `good film`, `thought provoking`.
+After stripping `<br />` and English stopwords **for visuals only**, class differences show up more clearly. Shared domain words still dominate (`movie`, `film`, `like`, `story`, `time`), but polarity cues appear in the top ranks: negative reviews favour `bad`, `don't`, and bigrams such as `waste time`, `bad movie`; positive reviews favour `great`, `love`, `best`, and bigrams such as `good movie`. With 3000 training reviews the ranks are more stable than at n=400, but absolute frequency remains a blunt tool compared with relative measures (e.g. log-odds).
 
-Classifiers still see raw text (including stopwords and negation). With only 300 training reviews the counts remain noisy, and absolute frequency is still a blunt tool compared with relative measures (e.g. log-odds).
+Classifiers still see raw text (including stopwords and negation).
 
 ### 2. Classical baseline
 
-- Macro F1 is 0.738 and accuracy 0.74 on 100 test reviews. With a sample this small the uncertainty is roughly ±9 points, so the result is better read as "somewhere around 0.65–0.83".
-- The negative class has recall 0.82 and the positive class 0.66, so the model leans toward predicting "negative"; precision goes the other way (0.71 vs 0.79). With 50 reviews per class I would not conclude this is a real bias.
-- The model was trained on only 300 reviews. It is a learning baseline, not an upper bound; with the full dataset TF-IDF + Logistic Regression typically performs considerably better.
+- Macro F1 is 0.844 (accuracy 0.844) on 1000 test reviews, with a 95% bootstrap CI of [0.821, 0.865]. That interval is much tighter than the rough ±9-point guess from the n=400 run.
+- Class-wise metrics are nearly balanced (negative recall 0.86 / positive 0.83; precision 0.83 / 0.85), so the earlier lean toward "negative" does not persist at this sample size.
+- Training on 3000 reviews lifts the classical baseline by about 10 F1 points versus n=400. It is still a learning baseline, not an upper bound on the full IMDb train split.
 
 ### 3. Same 40 samples
 
-- Classical F1 is 0.68 vs DistilBERT 0.79. DistilBERT gets about 4 more reviews right out of 40.
-- Both models are wrong on 5 reviews, only DistilBERT on 3, and only the classical model on 7. These are differences of a few examples, and with n=40 a single flipped prediction moves F1 by about 2–3 points. DistilBERT looks somewhat better here, but this sample does not demonstrate it.
-- The comparison is not controlled: DistilBERT was trained on SST-2 (short sentences), the classical model on 300 IMDb reviews, and long reviews are truncated for DistilBERT.
+- On the shared subset, classical F1 is 0.80 vs DistilBERT 0.92. The subset CIs are wide ([0.67, 0.92] vs [0.82, 1.00]) because n=40 is tiny: a few flipped labels move F1 by several points, and the intervals overlap.
+- DistilBERT looks stronger point-wise here, but this is still not a controlled comparison: SST-2 vs IMDb training, truncation, and a 40-review slice of a 1000-review test set.
+- The classical model is now trained on 3000 IMDb reviews, so the subset gap is not explained by the tiny classical sample from the earlier run.
 
 ### 4. Example errors
 
-The causes below are hypotheses based on reading the reviews, not verified.
+The examples below are from the earlier `--n 400` run; they remain useful failure modes, not a fresh error audit of the n=4000 model.
 
 - **Positive review of *The Running Man*** (classical model wrong). It starts with "the acting and script here isn't even up to par…" but ends praising the idea of the movie. Mixed opinions with negation and concessions are hard for a bag of n-grams.
 - **Positive review of a Jafar Panahi film** (DistilBERT wrong). It says "I don't think he's as successful. Not that what he's saying isn't important…". Double negation, with the verdict wrapped in qualifications.
 - **Positive review of a Robert Taylor western** (DistilBERT wrong). A plot description with negative vocabulary ("slaughter", "hatred", "tragic") used to appraise the film, not to criticise it. Likely domain shift: the tone of the subject is confused with the tone of the opinion.
 
-In this sample, the reviews where DistilBERT fails are on average shorter (about 220 words) than those it gets right (about 277). With 8 errors I would not draw conclusions from this, and I did not check how many reviews actually exceed the 512-token limit, so truncation cannot be ruled in or out.
+In that earlier sample, reviews where DistilBERT failed were on average shorter than those it got right; with few errors that pattern is not conclusive, and truncation at 512 tokens was not measured directly.
 
 ### 5. Next steps
 
-- Use more data (e.g. `--n 4000`) and cross-validation or bootstrap intervals to estimate uncertainty.
-- Evaluate DistilBERT on all 100 test reviews, not just 40.
+- Evaluate DistilBERT on the full held-out test set (1000 reviews at `--n 4000`), not just 40.
 - Compare relative frequencies between classes (e.g. log-odds) instead of raw counts.
 - Add a third baseline, such as a transformer fine-tuned on IMDb, to separate the effect of domain from the effect of architecture.
 
