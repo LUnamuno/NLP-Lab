@@ -49,6 +49,112 @@ def bootstrap_macro_f1(y_true, y_pred, n_boot: int, seed: int) -> dict:
     }
 
 
+def transformer_eval_size(transformer_n: int, n_test: int) -> int:
+    """0 skips inference; -1 uses the full test set; positive values cap at n_test."""
+    if transformer_n == 0:
+        return 0
+    if transformer_n < 0:
+        return n_test
+    return min(transformer_n, n_test)
+
+
+def chunk_token_ids(ids: list[int], content_max: int, stride: int | None = None) -> list[list[int]]:
+    """Split a token-id sequence into windows of at most content_max tokens."""
+    if content_max < 1:
+        raise ValueError("content_max must be positive")
+    ids = list(ids)
+    if len(ids) <= content_max:
+        return [ids]
+    stride = content_max if stride is None else stride
+    if stride < 1:
+        raise ValueError("stride must be positive")
+    chunks: list[list[int]] = []
+    start = 0
+    while True:
+        end = min(start + content_max, len(ids))
+        chunks.append(ids[start:end])
+        if end == len(ids):
+            return chunks
+        start += stride
+
+
+def _positive_label_index(id2label: dict) -> int:
+    for key, label in id2label.items():
+        if str(label).upper() == "POSITIVE":
+            return int(key)
+    raise ValueError("Could not find a POSITIVE label in the model config")
+
+
+def predict_full_reviews(pipe, texts: list[str], batch_size: int = 8) -> dict:
+    """Score each review using all tokens: average DistilBERT logits across 512-token chunks.
+
+    The first chunk is the same prefix a truncated 512-token forward pass would see.
+    """
+    import torch
+
+    tokenizer = pipe.tokenizer
+    model = pipe.model
+    model.eval()
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        raise ValueError("Tokenizer needs a pad token")
+    content_max = tokenizer.model_max_length - 2
+    stride = max(1, content_max // 2)
+    pos_index = _positive_label_index(model.config.id2label)
+
+    previous_max = tokenizer.model_max_length
+    tokenizer.model_max_length = int(1e9)
+    try:
+        body_ids = [
+            tokenizer.encode(text, add_special_tokens=False, truncation=False)
+            for text in texts
+        ]
+    finally:
+        tokenizer.model_max_length = previous_max
+
+    owners: list[int] = []
+    is_first: list[bool] = []
+    windows: list[list[int]] = []
+    n_chunks = []
+    for i, ids in enumerate(body_ids):
+        chunks = chunk_token_ids(ids, content_max, stride=stride)
+        n_chunks.append(len(chunks))
+        for j, chunk in enumerate(chunks):
+            owners.append(i)
+            is_first.append(j == 0)
+            windows.append([tokenizer.cls_token_id, *chunk, tokenizer.sep_token_id])
+
+    logits_sum = np.zeros((len(texts), model.config.num_labels), dtype=np.float64)
+    prefix_logits = np.zeros((len(texts), model.config.num_labels), dtype=np.float64)
+    device = model.device
+    with torch.no_grad():
+        for start in range(0, len(windows), batch_size):
+            batch = windows[start:start + batch_size]
+            max_len = max(len(x) for x in batch)
+            input_ids = torch.tensor(
+                [x + [pad_id] * (max_len - len(x)) for x in batch],
+                dtype=torch.long,
+                device=device,
+            )
+            attention_mask = (input_ids != pad_id).long()
+            scores = model(input_ids=input_ids, attention_mask=attention_mask).logits.cpu().numpy()
+            for row, owner, first in zip(scores, owners[start:start + batch_size], is_first[start:start + batch_size]):
+                logits_sum[owner] += row
+                if first:
+                    prefix_logits[owner] = row
+
+    full_logits = logits_sum / np.asarray(n_chunks)[:, None]
+    n_long = int(sum(n > 1 for n in n_chunks))
+    return {
+        "full": (full_logits.argmax(axis=1) == pos_index).astype(int).tolist(),
+        "prefix": (prefix_logits.argmax(axis=1) == pos_index).astype(int).tolist(),
+        "n_long": n_long,
+        "n_chunks_mean": float(np.mean(n_chunks)),
+        "max_len": int(tokenizer.model_max_length),
+        "n_chunks": n_chunks,
+    }
+
+
 def main(n: int, seed: int, transformer_n: int, bootstrap_n: int):
     OUT.mkdir(exist_ok=True)
     df = load_reviews(n, seed)
@@ -83,22 +189,45 @@ def main(n: int, seed: int, transformer_n: int, bootstrap_n: int):
     plt.savefig(OUT / "confusion_matrix_classical.png", dpi=150)
     plt.close()
 
-    if transformer_n:
+    eval_n = transformer_eval_size(transformer_n, len(test))
+    if eval_n:
         from transformers import pipeline
         # This model is fine-tuned on SST-2, not IMDb: treat comparison as illustrative.
-        model = pipeline("text-classification", model="distilbert/distilbert-base-uncased-finetuned-sst-2-english", device=-1)
-        sample = test.sample(n=min(transformer_n, len(test)), random_state=seed)
-        # pipeline truncates long reviews at model max length.
-        predicted = model(sample.text.tolist(), truncation=True, batch_size=8)
-        transformer = [1 if item["label"].upper() == "POSITIVE" else 0 for item in predicted]
-        classical_subset = clf.predict(vectorizer.transform(sample.text))
-        report["transformer_subset"] = classification_report(sample.label, transformer, output_dict=True, zero_division=0)
-        report["comparison_note"] = "Different training corpora; transformer uses truncated inputs and a subset. Not a controlled benchmark."
-        report["classical_same_subset_macro_f1"] = float(f1_score(sample.label, classical_subset, average="macro"))
-        report["transformer_subset_macro_f1"] = float(f1_score(sample.label, transformer, average="macro"))
-        report["classical_same_subset_bootstrap"] = bootstrap_macro_f1(sample.label, classical_subset, bootstrap_n, seed)
-        report["transformer_subset_bootstrap"] = bootstrap_macro_f1(sample.label, transformer, bootstrap_n, seed)
-        report["transformer_subset_size"] = len(sample)
+        model_id = "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+        model = pipeline("text-classification", model=model_id, device=-1)
+        sample = test if eval_n == len(test) else test.sample(n=eval_n, random_state=seed)
+        texts = sample.text.tolist()
+        y = sample.label.to_numpy()
+        predicted = predict_full_reviews(model, texts, batch_size=8)
+        transformer = np.asarray(predicted["full"])
+        prefix = np.asarray(predicted["prefix"])
+        classical_same = clf.predict(vectorizer.transform(sample.text))
+        short_mask = np.asarray(predicted["n_chunks"]) == 1
+        report["transformer"] = classification_report(y, transformer, output_dict=True, zero_division=0)
+        report["transformer_bootstrap"] = bootstrap_macro_f1(y, transformer, bootstrap_n, seed)
+        report["transformer_prefix"] = classification_report(y, prefix, output_dict=True, zero_division=0)
+        report["transformer_prefix_bootstrap"] = bootstrap_macro_f1(y, prefix, bootstrap_n, seed)
+        report["classical_same_eval_macro_f1"] = float(f1_score(y, classical_same, average="macro"))
+        report["classical_same_eval_bootstrap"] = bootstrap_macro_f1(y, classical_same, bootstrap_n, seed)
+        report["transformer_eval_size"] = int(eval_n)
+        report["transformer_n_long"] = predicted["n_long"]
+        report["transformer_n_chunks_mean"] = predicted["n_chunks_mean"]
+        report["transformer_max_len"] = predicted["max_len"]
+        if short_mask.any():
+            report["n_short"] = int(short_mask.sum())
+            report["classical_short_macro_f1"] = float(f1_score(y[short_mask], classical_same[short_mask], average="macro"))
+            report["transformer_short_macro_f1"] = float(f1_score(y[short_mask], transformer[short_mask], average="macro"))
+            report["classical_short_bootstrap"] = bootstrap_macro_f1(y[short_mask], classical_same[short_mask], bootstrap_n, seed)
+            report["transformer_short_bootstrap"] = bootstrap_macro_f1(y[short_mask], transformer[short_mask], bootstrap_n, seed)
+        report["comparison_note"] = (
+            "Different training corpora (SST-2 vs IMDb). DistilBERT still cannot attend over "
+            "a full long review in one pass; long reviews are split into overlapping 512-token "
+            "chunks and logits are averaged so both models use every token."
+        )
+        ConfusionMatrixDisplay.from_predictions(y, transformer, display_labels=["negative", "positive"])
+        plt.tight_layout()
+        plt.savefig(OUT / "confusion_matrix_transformer.png", dpi=150)
+        plt.close()
 
     with open(OUT / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
@@ -109,19 +238,38 @@ def main(n: int, seed: int, transformer_n: int, bootstrap_n: int):
         round(report["classical"]["macro avg"]["f1-score"], 3),
         f"(95% bootstrap CI [{ci[0]:.3f}, {ci[1]:.3f}] on {len(test)} test reviews)",
     )
-    if transformer_n:
-        print("Macro F1 on same subset — classical:", round(report["classical_same_subset_macro_f1"], 3))
-        print("Macro F1 on same subset — transformer:", round(report["transformer_subset_macro_f1"], 3))
+    if eval_n:
+        t_ci = report["transformer_bootstrap"]["macro_f1_ci95"]
+        p_ci = report["transformer_prefix_bootstrap"]["macro_f1_ci95"]
+        print(
+            "Transformer macro F1 (full text, chunked):",
+            round(report["transformer"]["macro avg"]["f1-score"], 3),
+            f"(95% bootstrap CI [{t_ci[0]:.3f}, {t_ci[1]:.3f}] on {eval_n} reviews; "
+            f"{report['transformer_n_long']} longer than {report['transformer_max_len']} tokens)",
+        )
+        print(
+            "Transformer macro F1 (first 512 tokens only):",
+            round(report["transformer_prefix"]["macro avg"]["f1-score"], 3),
+            f"(95% bootstrap CI [{p_ci[0]:.3f}, {p_ci[1]:.3f}])",
+        )
+        if "n_short" in report:
+            print(
+                "Short reviews only — classical:",
+                round(report["classical_short_macro_f1"], 3),
+                "transformer:",
+                round(report["transformer_short_macro_f1"], 3),
+                f"(n={report['n_short']})",
+            )
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=4000, help="Balanced total number of IMDb training reviews (even integer)")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--transformer-n", type=int, default=40, help="0 to skip transformer inference")
+    ap.add_argument("--transformer-n", type=int, default=-1, help="Reviews for DistilBERT: -1=all test, 0=skip, >0=subset")
     ap.add_argument("--bootstrap-n", type=int, default=1000, help="Bootstrap resamples for macro-F1 95% CIs")
     args = ap.parse_args()
     if args.n < 8 or args.n % 2: ap.error("--n must be even and at least 8")
-    if args.transformer_n < 0: ap.error("--transformer-n must be nonnegative")
+    if args.transformer_n < -1: ap.error("--transformer-n must be -1, 0, or a positive integer")
     if args.bootstrap_n < 100: ap.error("--bootstrap-n must be at least 100")
     main(args.n, args.seed, args.transformer_n, args.bootstrap_n)
